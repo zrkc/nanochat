@@ -1,4 +1,14 @@
 """
+这个 test_engine.py 覆盖的功能点主要是：
+- KVCache 基础行为：初始化形状、advance、reset、get_layer_cache 视图正确性。
+- KVCache 预填充：prefill 复制位置与缓存数据是否正确。
+- 多样本采样：首 token 应该独立采样，防止广播同一 token。
+- 随机种子可复现：同 seed 产出一致结果。
+- 温度为 0 的确定性：不同 seed 也应一致。
+- 最大生成长度：max_tokens 限制被遵守。
+- 样本数正确：num_samples 返回对应数量序列。
+- 非零温度的多样性：不同 seed 应产生不同结果。
+
 Test Engine class. Example run:
 
 python -m pytest tests/test_engine.py -v

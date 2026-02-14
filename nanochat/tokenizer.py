@@ -24,6 +24,16 @@ SPECIAL_TOKENS = [
     "<|output_end|>",
 ]
 
+"""
+BPE（Byte Pair Encoding）是一种子词分词器：从字符/字节开始，迭代合并最常见的相邻符号对，
+形成子词词表。优点是词表小、覆盖广、能处理未登录词。
+SPLIT_PATTERN 是用于“预切分”的正则，把文本先分成可训练的片段再做 BPE 合并。
+预切分就是在 BPE 之前先用规则（如正则）把文本粗分成更小片段（词、数字、标点、空白等），
+作为 BPE 的输入粒度。这样能稳定边界、减少噪声。
+它大致把文本分成：英语缩写（'s/'t 等）、字母串、1–2 位数字、标点/符号块、换行和空白。
+这里把数字切分限制为 1–2 位（而不是 1–3 位），是为了在 32K 词表下减少数字相关 token 的浪费。
+"""
+
 # NOTE: this split pattern deviates from GPT-4 in that we use \p{N}{1,2} instead of \p{N}{1,3}
 # I did this because I didn't want to "waste" too many tokens on numbers for smaller vocab sizes.
 # I verified that 2 is the sweet spot for vocab size of 32K. 1 is a bit worse, 3 was worse still.
@@ -31,6 +41,10 @@ SPLIT_PATTERN = r"""'(?i:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?+\p{L}+|\p{N}{1,2}| 
 
 # -----------------------------------------------------------------------------
 # Generic GPT-4-style tokenizer based on HuggingFace Tokenizer
+"""
+tokenizers 是 HuggingFace 的分词库（Rust 实现、Python 接口），
+用于高性能训练和使用 BPE/WordPiece 等分词器。
+"""
 from tokenizers import Tokenizer as HFTokenizer
 from tokenizers import pre_tokenizers, decoders, Regex
 from tokenizers.models import BPE
@@ -71,6 +85,14 @@ class HuggingFaceTokenizer:
         # NOTE: The pattern was changed from \p{N}{1,3} to \p{N}{1,2} because I suspect it is harmful to
         # very small models and smaller vocab sizes, because it is a little bit wasteful in the token space.
         # (but I haven't validated this! TODO)
+
+        """
+        这段是在用 HuggingFace 的 tokenizers 训练 BPE 分词器，核心流程是：预切分 → ByteLevel → 训练 → 解码器。
+        - Regex + Split：先按 SPLIT_PATTERN 把文本粗分成片段（词、数字、标点、空白），作为 BPE 的输入粒度。
+        - ByteLevel 预分词：把文本映射到字节层面，保证任意字符都可表示，避免未登录字符。
+        - Decoder（ByteLevel）：因为编码时做了 ByteLevel 处理，解码时需要把字节序列还原成原始字符串；它和 ByteLevel 预分词器是一对。
+        - Trainer（BPE）：配置词表大小、特殊 token、初始字节表等，然后 train_from_iterator 真正训练合并规则。
+        """
         gpt4_split_regex = Regex(SPLIT_PATTERN) # huggingface demands that you wrap it in Regex!!
         tokenizer.pre_tokenizer = pre_tokenizers.Sequence([
             pre_tokenizers.Split(pattern=gpt4_split_regex, behavior="isolated", invert=False),
@@ -156,6 +178,10 @@ class HuggingFaceTokenizer:
 
 # -----------------------------------------------------------------------------
 # Tokenizer based on rustbpe + tiktoken combo
+"""
+rustbpe：一个用 Rust 实现的 BPE 训练器，用于从文本学习合并规则与词表。
+tiktoken：OpenAI 开源的高性能分词库，用于快速编码/解码（推理阶段效率高）。
+"""
 import pickle
 import rustbpe
 import tiktoken
@@ -169,6 +195,11 @@ class RustBPETokenizer:
 
     @classmethod
     def train_from_iterator(cls, text_iterator, vocab_size):
+        """
+        1. 用 rustbpe 训练 BPE：从 text_iterator 学合并规则与词表。
+        2. 构建 tiktoken 编码器用于推理：取出训练得到的 pattern 和 mergeable_ranks，
+           再把 SPECIAL_TOKENS 追加到词表末尾，创建 tiktoken.Encoding。
+        """
         # 1) train using rustbpe
         tokenizer = rustbpe.Tokenizer()
         # the special tokens are inserted later in __init__, we don't train them here
@@ -265,6 +296,12 @@ class RustBPETokenizer:
 
     def render_conversation(self, conversation, max_tokens=2048):
         """
+        把一条对话转成 token id 序列和监督 mask：
+        - 先处理 system 消息并合并到首个 user 消息；
+        - 依次加入 <|bos|>、用户/助手起止标记、python/输出标记；
+        - 对 assistant 内容设 mask=1（需要训练），对 user/工具输出设 mask=0；
+        - 最后截断到 max_tokens。
+
         Tokenize a single Chat conversation (which we call a "doc" or "document" here).
         Returns:
         - ids: list[int] is a list of token ids of this rendered conversation
@@ -350,7 +387,10 @@ class RustBPETokenizer:
         return ids, mask
 
     def visualize_tokenization(self, ids, mask, with_token_id=False):
-        """Small helper function useful in debugging: visualize the tokenization of render_conversation"""
+        """
+        Small helper function useful in debugging:
+        visualize the tokenization of render_conversation
+        """
         RED = '\033[91m'
         GREEN = '\033[92m'
         RESET = '\033[0m'
@@ -366,6 +406,10 @@ class RustBPETokenizer:
 
     def render_for_completion(self, conversation):
         """
+        用在 强化学习/推理补全：它先把对话里最后一条 assistant 消息移除，
+        再按 render_conversation 编码，最后追加 <|assistant_start|>，
+        用来引导模型生成下一段回复（不返回 mask）。
+
         Used during Reinforcement Learning. In that setting, we want to
         render the conversation priming the Assistant for a completion.
         Unlike the Chat SFT case, we don't need to return the mask.
